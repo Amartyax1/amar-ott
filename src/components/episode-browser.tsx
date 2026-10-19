@@ -2,23 +2,13 @@
 
 import { useState } from "react";
 import { SendButton } from "@/components/send-button";
-import { WatchButton } from "@/components/watch-button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { EpisodeWithFiles } from "@/lib/catalog";
 import { bestVersion, episodeCode, formatBytes, formatDuration, qualityLabel } from "@/lib/format";
-import { isLikelyPlayable } from "@/lib/playable";
 
 type Season = { season: number; episodes: EpisodeWithFiles[] };
 
-export function EpisodeBrowser({
-  showName,
-  seasons,
-  canStream = false,
-}: {
-  showName: string;
-  seasons: Season[];
-  canStream?: boolean;
-}) {
+export function EpisodeBrowser({ showName, seasons }: { showName: string; seasons: Season[] }) {
   const [current, setCurrent] = useState(String(seasons[0]?.season ?? 1));
   const season = seasons.find((s) => String(s.season) === current) ?? seasons[0];
   if (!season) return null;
@@ -94,17 +84,6 @@ export function EpisodeBrowser({
                   </div>
                 ) : null}
               </div>
-              {canStream ? (
-                <WatchButton
-                  fileId={best.id}
-                  label={`${showName} ${code}`}
-                  likelyPlayable={isLikelyPlayable(best)}
-                  size="sm"
-                  aria-label={`Watch ${code}`}
-                >
-                  <span className="hidden sm:inline">Watch</span>
-                </WatchButton>
-              ) : null}
               <SendButton
                 fileIds={[best.id]}
                 label={`${showName} ${code}`}

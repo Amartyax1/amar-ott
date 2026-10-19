@@ -4,12 +4,11 @@ A private, Netflix-style website for a movie and TV library that lives in Telegr
 
 You upload movies and episodes to a private Telegram group shared by you and your bot. The bot indexes every upload. Friends log in to the website with Telegram, browse posters, pick a movie, an episode or a whole season, and the bot sends the file to their Telegram DM.
 
-Pick **Watch** to play a file in the browser (streamed from Telegram over MTProto), or **Send to Telegram** to get a copy in your DM. Files are never re-uploaded: Telegram reuses the original `file_id`.
+Press **Send to Telegram** and the bot delivers a copy to that person's DM. Files are never re-uploaded: Telegram reuses the original `file_id`.
 
 ```
 you --upload--> vault group --update--> bot --index--> SQLite <-- website <-- friends
-                                         |               |                  |
-                                         |               +-- stream Watch --+
+                                         |
                                          +-- send file to DM <--queue-------+
 ```
 
@@ -52,10 +51,7 @@ All of these go in `.env` in the project root (the same folder as `package.json`
 2. **Let it read the group.** In BotFather, send `/setprivacy`, choose your bot, then **Disable**. Alternatively, make the bot an admin in the group.
 3. **Create the vault.** Create a private group with just you and the bot. Start `npm run dev`, send `/chatid` in the group, and put the id (e.g. `-1001234567890`) in `VAULT_CHAT_ID`. Restart.
 4. **Set `SESSION_SECRET`** to something random: `openssl rand -hex 32`.
-5. **Enable Watch.** Open [my.telegram.org](https://my.telegram.org) (log in with your phone), open **API development tools**, create an app, and put `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in `.env`. Without these, friends can still send files to Telegram but cannot play them on the site.
-6. **Optional:** get a free TMDB API key and set `TMDB_API_KEY` for real posters and descriptions.
-
-Browsers play **MP4 / WebM with H.264 or VP9**. MKV and HEVC (x265) usually will not play; use **Send to Telegram** for those.
+5. **Optional:** get a free TMDB API key and set `TMDB_API_KEY` for real posters and descriptions.
 
 The bot only sees messages sent after it joined the group, so add it before uploading.
 
@@ -119,12 +115,11 @@ To revoke someone, delete their row from the `users` table.
 src/
   app/(catalog)/        home, movies, shows, search, title/[id] (login required)
   app/login/            Telegram deep-link login
-  app/api/              auth, send queue, and /api/stream/[id] (Watch)
+  app/api/              auth and send queue endpoints
   bot/                  grammY bot and paced delivery worker
   db/                   Drizzle schema, SQLite setup, demo seed
   lib/parse.ts          caption / file-name parser (+ tests)
   lib/catalog.ts        indexing and catalog queries
-  lib/mtproto.ts        GramJS client that streams vault files to the player
   lib/access.ts         login tokens, allowlist, invites
   lib/sends.ts          per-user rate limit and delivery queue
 ```

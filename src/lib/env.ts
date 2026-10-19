@@ -16,12 +16,7 @@ export const env = {
   siteUrl: process.env.SITE_URL?.trim() || "http://localhost:4317",
   databasePath: process.env.DATABASE_PATH?.trim() || "data/reelvault.db",
   sendLimitPerHour: Number(process.env.SEND_LIMIT_PER_HOUR ?? 40),
-  telegramApiId: Number(process.env.TELEGRAM_API_ID ?? 0) || 0,
-  telegramApiHash: process.env.TELEGRAM_API_HASH?.trim() || "",
 };
 
 /** Mock mode runs the whole app without Telegram: demo catalog, dev login, logged sends. */
 export const isMock = !env.botToken;
-
-/** In-browser playback needs MTProto credentials from my.telegram.org, plus a live bot token. */
-export const streamingEnabled = Boolean(env.botToken && env.telegramApiId && env.telegramApiHash);

@@ -2,12 +2,9 @@ import Link from "next/link";
 import { Info, ListVideo, Star } from "lucide-react";
 import { Artwork } from "@/components/artwork";
 import { SendButton } from "@/components/send-button";
-import { WatchButton } from "@/components/watch-button";
 import { buttonVariants } from "@/components/ui/button";
 import type { TitleDetail } from "@/lib/catalog";
-import { streamingEnabled } from "@/lib/env";
 import { formatDuration } from "@/lib/format";
-import { isLikelyPlayable } from "@/lib/playable";
 import { cn } from "@/lib/utils";
 
 export function Hero({ title }: { title: TitleDetail }) {
@@ -59,23 +56,8 @@ export function Hero({ title }: { title: TitleDetail }) {
           </p>
         ) : null}
         <div className="mt-6 flex flex-wrap gap-3">
-          {movieFile && streamingEnabled ? (
-            <WatchButton
-              fileId={movieFile.id}
-              label={title.name}
-              likelyPlayable={isLikelyPlayable(movieFile)}
-              size="lg"
-              className="h-11 px-5 text-base"
-            />
-          ) : null}
           {movieFile ? (
-            <SendButton
-              fileIds={[movieFile.id]}
-              label={title.name}
-              size="lg"
-              variant={streamingEnabled ? "secondary" : "default"}
-              className="h-11 px-5 text-base"
-            />
+            <SendButton fileIds={[movieFile.id]} label={title.name} size="lg" className="h-11 px-5 text-base" />
           ) : (
             <Link href={`/title/${title.id}`} className={cn(buttonVariants({ size: "lg" }), "h-11 px-5 text-base")}>
               <ListVideo />
