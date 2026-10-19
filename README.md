@@ -4,12 +4,13 @@ A private, Netflix-style website for a movie and TV library that lives in Telegr
 
 You upload movies and episodes to a private Telegram group shared by you and your bot. The bot indexes every upload. Friends log in to the website with Telegram, browse posters, pick a movie, an episode or a whole season, and the bot sends the file to their Telegram DM.
 
-Files are never downloaded or re-uploaded. The bot re-sends Telegram's own `file_id`, so full-size uploads (up to 2 GB, or 4 GB with Premium) arrive instantly.
+Pick **Watch** to play a file in the browser (streamed from Telegram over MTProto), or **Send to Telegram** to get a copy in your DM. Files are never re-uploaded: Telegram reuses the original `file_id`.
 
 ```
 you --upload--> vault group --update--> bot --index--> SQLite <-- website <-- friends
-                                         |                           |
-                                         +-- sends file to DM <--queue+
+                                         |               |                  |
+                                         |               +-- stream Watch --+
+                                         +-- send file to DM <--queue-------+
 ```
 
 ## Stack
@@ -25,7 +26,7 @@ Requires Node.js 20+.
 
 ```bash
 npm install
-cp .env.example .env    # optional: leave BOT_TOKEN empty for demo mode
+cp .env.example .env    # this file lives in the project root, next to package.json
 npm run dev
 ```
 
@@ -45,11 +46,16 @@ Use it to see the UI before setting up Telegram.
 
 ## Connect Telegram
 
-1. **Create the bot.** Message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token into `BOT_TOKEN` and the username into `BOT_USERNAME`.
+All of these go in `.env` in the project root (the same folder as `package.json`). Copy `.env.example` if the file is not there yet.
+
+1. **Create the bot.** Message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token into `BOT_TOKEN` and the username (without `@`) into `BOT_USERNAME`.
 2. **Let it read the group.** In BotFather, send `/setprivacy`, choose your bot, then **Disable**. Alternatively, make the bot an admin in the group.
 3. **Create the vault.** Create a private group with just you and the bot. Start `npm run dev`, send `/chatid` in the group, and put the id (e.g. `-1001234567890`) in `VAULT_CHAT_ID`. Restart.
 4. **Set `SESSION_SECRET`** to something random: `openssl rand -hex 32`.
-5. **Optional:** get a free TMDB API key and set `TMDB_API_KEY` for real posters and descriptions.
+5. **Enable Watch.** Open [my.telegram.org](https://my.telegram.org) (log in with your phone), open **API development tools**, create an app, and put `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in `.env`. Without these, friends can still send files to Telegram but cannot play them on the site.
+6. **Optional:** get a free TMDB API key and set `TMDB_API_KEY` for real posters and descriptions.
+
+Browsers play **MP4 / WebM with H.264 or VP9**. MKV and HEVC (x265) usually will not play; use **Send to Telegram** for those.
 
 The bot only sees messages sent after it joined the group, so add it before uploading.
 
@@ -113,11 +119,12 @@ To revoke someone, delete their row from the `users` table.
 src/
   app/(catalog)/        home, movies, shows, search, title/[id] (login required)
   app/login/            Telegram deep-link login
-  app/api/              auth + send queue endpoints
+  app/api/              auth, send queue, and /api/stream/[id] (Watch)
   bot/                  grammY bot and paced delivery worker
   db/                   Drizzle schema, SQLite setup, demo seed
   lib/parse.ts          caption / file-name parser (+ tests)
   lib/catalog.ts        indexing and catalog queries
+  lib/mtproto.ts        GramJS client that streams vault files to the player
   lib/access.ts         login tokens, allowlist, invites
   lib/sends.ts          per-user rate limit and delivery queue
 ```

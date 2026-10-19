@@ -68,7 +68,7 @@ export function topGenres(minTitles = 3, max = 6): string[] {
 
 export type FileVersion = Pick<
   FileRow,
-  "id" | "fileName" | "size" | "duration" | "width" | "height" | "mediaType" | "createdAt"
+  "id" | "fileName" | "mimeType" | "size" | "duration" | "width" | "height" | "mediaType" | "createdAt"
 >;
 
 export type EpisodeWithFiles = Pick<Episode, "id" | "season" | "episode" | "name"> & { files: FileVersion[] };
@@ -81,6 +81,7 @@ export type TitleDetail = Title & {
 const VERSION_COLUMNS = {
   id: files.id,
   fileName: files.fileName,
+  mimeType: files.mimeType,
   size: files.size,
   duration: files.duration,
   width: files.width,
@@ -240,6 +241,10 @@ export async function indexUpload(upload: UploadInfo): Promise<IndexResult> {
     .get();
   touch(title.id);
   return { file, title, episode, duplicate: false };
+}
+
+export function getFileById(id: number): FileRow | undefined {
+  return db.select().from(files).where(and(eq(files.id, id), eq(files.hidden, false))).get();
 }
 
 export function findVaultFile(vaultChatId: number, vaultMessageId: number): FileRow | undefined {

@@ -6,9 +6,12 @@ import { ArrowLeft, Clock, HardDrive, Star } from "lucide-react";
 import { Artwork } from "@/components/artwork";
 import { EpisodeBrowser } from "@/components/episode-browser";
 import { SendButton } from "@/components/send-button";
+import { WatchButton } from "@/components/watch-button";
 import { Badge } from "@/components/ui/badge";
 import { getTitle } from "@/lib/catalog";
+import { streamingEnabled } from "@/lib/env";
 import { bestVersion, formatBytes, formatDuration, qualityLabel, timeAgo } from "@/lib/format";
+import { isLikelyPlayable } from "@/lib/playable";
 
 async function load(params: PageProps<"/title/[id]">["params"]) {
   await connection();
@@ -110,8 +113,27 @@ export default async function TitlePage({ params }: PageProps<"/title/[id]">) {
 
             {movieBest ? (
               <div className="mt-7 flex flex-wrap items-center gap-3">
-                <SendButton fileIds={[movieBest.id]} label={title.name} size="lg" className="h-11 px-5 text-base" />
-                <p className="text-xs text-muted-foreground">Delivered to your Telegram chat with the bot.</p>
+                {streamingEnabled ? (
+                  <WatchButton
+                    fileId={movieBest.id}
+                    label={title.name}
+                    likelyPlayable={isLikelyPlayable(movieBest)}
+                    size="lg"
+                    className="h-11 px-5 text-base"
+                  />
+                ) : null}
+                <SendButton
+                  fileIds={[movieBest.id]}
+                  label={title.name}
+                  size="lg"
+                  variant={streamingEnabled ? "secondary" : "default"}
+                  className="h-11 px-5 text-base"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {streamingEnabled
+                    ? "Watch here, or send a copy to your Telegram chat."
+                    : "Delivered to your Telegram chat with the bot."}
+                </p>
               </div>
             ) : null}
           </div>
@@ -119,7 +141,7 @@ export default async function TitlePage({ params }: PageProps<"/title/[id]">) {
 
         <div className="mt-12 max-w-5xl">
           {title.kind === "show" ? (
-            <EpisodeBrowser showName={title.name} seasons={title.seasons} />
+            <EpisodeBrowser showName={title.name} seasons={title.seasons} canStream={streamingEnabled} />
           ) : title.files.length > 1 ? (
             <section>
               <h2 className="text-xl font-semibold tracking-tight">Available versions</h2>
@@ -135,6 +157,16 @@ export default async function TitlePage({ params }: PageProps<"/title/[id]">) {
                           .join(" · ")}
                       </p>
                     </div>
+                    {streamingEnabled ? (
+                      <WatchButton
+                        fileId={f.id}
+                        label={title.name}
+                        likelyPlayable={isLikelyPlayable(f)}
+                        size="sm"
+                      >
+                        <span className="hidden sm:inline">Watch</span>
+                      </WatchButton>
+                    ) : null}
                     <SendButton fileIds={[f.id]} label={title.name} size="sm" variant="secondary">
                       <span className="hidden sm:inline">Send</span>
                     </SendButton>

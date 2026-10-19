@@ -1,7 +1,9 @@
+import path from "node:path";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["better-sqlite3"],
+  turbopack: { root: path.resolve(__dirname) },
+  serverExternalPackages: ["better-sqlite3", "telegram", "websocket"],
   images: {
     remotePatterns: [{ protocol: "https", hostname: "image.tmdb.org" }],
   },
