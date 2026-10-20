@@ -14,9 +14,9 @@ export const env = {
   allowedUserIds: list(process.env.ALLOWED_USER_IDS),
   openRegistration: process.env.OPEN_REGISTRATION === "true",
   siteUrl: process.env.SITE_URL?.trim() || "http://localhost:4317",
-  databasePath: process.env.DATABASE_PATH?.trim() || "data/reelvault.db",
+  databaseUrl: process.env.DATABASE_URL?.trim() || "",
   sendLimitPerHour: Number(process.env.SEND_LIMIT_PER_HOUR ?? 40),
 };
 
-/** Mock mode runs the whole app without Telegram: demo catalog, dev login, logged sends. */
+/** Mock mode runs the whole app without Telegram: demo login, logged sends. */
 export const isMock = !env.botToken;

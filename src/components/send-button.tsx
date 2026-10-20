@@ -10,6 +10,23 @@ type Status = { id: number; status: "queued" | "sending" | "sent" | "failed"; er
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function finishFromStatuses(sends: Status[], toastId: string | number, label: string): boolean {
+  const failed = sends.filter((s) => s.status === "failed");
+  if (failed.length === sends.length) {
+    toast.error("Couldn't deliver", { id: toastId, description: failed[0]?.error ?? undefined });
+    return false;
+  }
+  if (failed.length) {
+    toast.warning(`${sends.length - failed.length} of ${sends.length} sent`, {
+      id: toastId,
+      description: failed[0]?.error ?? undefined,
+    });
+    return true;
+  }
+  toast.success("Check your Telegram", { id: toastId, description: `${label} is waiting in your chat with the bot.` });
+  return true;
+}
+
 async function track(ids: number[], toastId: string | number, label: string): Promise<boolean> {
   // The bot paces deliveries (~1/s), so allow time proportional to the batch.
   const deadline = Date.now() + 30_000 + ids.length * 2_500;
@@ -65,7 +82,7 @@ export function SendButton({ fileIds, label, children, disabled, ...buttonProps 
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ fileIds }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ids?: number[]; error?: string };
+      const data = (await res.json().catch(() => ({}))) as { ids?: number[]; sends?: Status[]; error?: string };
       if (res.status === 401) {
         toast.error("Your session expired", { id: toastId, description: "Log in again to keep watching." });
         router.push("/login");
@@ -76,7 +93,9 @@ export function SendButton({ fileIds, label, children, disabled, ...buttonProps 
         setState("idle");
         return;
       }
-      const ok = await track(data.ids, toastId, label);
+      const ok = data.sends?.length
+        ? finishFromStatuses(data.sends, toastId, label)
+        : await track(data.ids, toastId, label);
       setState(ok ? "sent" : "idle");
       if (ok) setTimeout(() => setState("idle"), 4000);
     } catch {

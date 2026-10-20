@@ -10,9 +10,9 @@ const COPY = {
   show: { heading: "TV Shows", noun: "shows", icon: Tv, path: "/shows" },
 } as const;
 
-export function BrowsePage({ kind, genre }: { kind: "movie" | "show"; genre?: string }) {
+export async function BrowsePage({ kind, genre }: { kind: "movie" | "show"; genre?: string }) {
   const copy = COPY[kind];
-  const all = listTitles({ kind });
+  const all = await listTitles({ kind });
   const genres = [...new Set(all.flatMap((t) => t.genres))].sort();
   const titles = genre ? all.filter((t) => t.genres.includes(genre)) : all;
 

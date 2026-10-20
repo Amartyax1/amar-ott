@@ -1,14 +1,11 @@
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
-import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { env, isMock } from "@/lib/env";
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { env } from "@/lib/env";
 import * as schema from "./schema";
-import { seedDemo } from "./seed";
 
 const MIGRATION = `
 CREATE TABLE IF NOT EXISTS titles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   kind TEXT NOT NULL,
   key TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -16,17 +13,17 @@ CREATE TABLE IF NOT EXISTS titles (
   overview TEXT,
   poster_url TEXT,
   backdrop_url TEXT,
-  genres TEXT NOT NULL DEFAULT '[]',
-  rating REAL,
+  genres JSONB NOT NULL DEFAULT '[]'::jsonb,
+  rating DOUBLE PRECISION,
   tmdb_id INTEGER,
-  hidden INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
-  updated_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+  hidden BOOLEAN NOT NULL DEFAULT false,
+  created_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint,
+  updated_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint
 );
 CREATE UNIQUE INDEX IF NOT EXISTS titles_kind_key ON titles(kind, key);
 
 CREATE TABLE IF NOT EXISTS episodes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   title_id INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
   season INTEGER NOT NULL,
   episode INTEGER NOT NULL,
@@ -35,7 +32,7 @@ CREATE TABLE IF NOT EXISTS episodes (
 CREATE UNIQUE INDEX IF NOT EXISTS episodes_title_se ON episodes(title_id, season, episode);
 
 CREATE TABLE IF NOT EXISTS files (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   title_id INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
   episode_id INTEGER REFERENCES episodes(id) ON DELETE CASCADE,
   telegram_file_id TEXT NOT NULL,
@@ -43,27 +40,26 @@ CREATE TABLE IF NOT EXISTS files (
   media_type TEXT NOT NULL,
   file_name TEXT,
   mime_type TEXT,
-  size INTEGER,
+  size BIGINT,
   duration INTEGER,
   width INTEGER,
   height INTEGER,
-  vault_chat_id INTEGER NOT NULL,
+  vault_chat_id BIGINT NOT NULL,
   vault_message_id INTEGER NOT NULL,
   caption TEXT,
-  hidden INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+  hidden BOOLEAN NOT NULL DEFAULT false,
+  created_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint
 );
 CREATE UNIQUE INDEX IF NOT EXISTS files_unique_id ON files(telegram_file_unique_id);
 CREATE UNIQUE INDEX IF NOT EXISTS files_vault_message ON files(vault_chat_id, vault_message_id);
-CREATE INDEX IF NOT EXISTS files_title ON files(title_id);
 
 CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY,
+  id BIGINT PRIMARY KEY,
   first_name TEXT NOT NULL,
   last_name TEXT,
   username TEXT,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
-  last_seen_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+  created_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint,
+  last_seen_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint
 );
 
 CREATE TABLE IF NOT EXISTS login_tokens (
@@ -71,51 +67,70 @@ CREATE TABLE IF NOT EXISTS login_tokens (
   browser_hash TEXT NOT NULL,
   invite_code TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
-  user_id INTEGER,
+  user_id BIGINT,
   reason TEXT,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
-  expires_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint,
+  expires_at BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS invites (
   code TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
-  used_by INTEGER,
-  used_at INTEGER
+  created_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint,
+  used_by BIGINT,
+  used_at BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS sends (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
+  id SERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'queued',
   error TEXT,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
-  sent_at INTEGER
+  created_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::bigint,
+  sent_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS sends_status ON sends(status, id);
 CREATE INDEX IF NOT EXISTS sends_user_time ON sends(user_id, created_at);
 `;
 
-export type DB = BetterSQLite3Database<typeof schema> & { $client: Database.Database };
+const globalForDb = globalThis as unknown as {
+  __reelvaultSql?: ReturnType<typeof postgres>;
+  __reelvaultReady?: Promise<void>;
+};
 
-function open(): DB {
-  const file = path.resolve(process.cwd(), env.databasePath);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const sqlite = new Database(file);
-  // Web app and bot are separate processes sharing this file.
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("busy_timeout = 5000");
-  sqlite.pragma("foreign_keys = ON");
-  sqlite.exec(MIGRATION);
-  const db = drizzle(sqlite, { schema }) as DB;
-  if (isMock) seedDemo(db);
-  return db;
+function connectionUrl() {
+  const url = env.databaseUrl;
+  if (!url) return "postgresql://127.0.0.1:9/unused";
+  // postgres.js uses prepare:false for pgbouncer; the extra query param is a Drizzle-kit hint only.
+  return url.replace(/[?&]pgbouncer=true\b/, "").replace(/\?$/, "");
 }
 
-const globalForDb = globalThis as unknown as { __reelvaultDb?: DB };
+// Don't connect at import time. A missing DATABASE_URL used to crash the bot
+// before it could even poll Telegram, so /start never got a reply.
+const sql =
+  globalForDb.__reelvaultSql ??
+  postgres(connectionUrl(), {
+    prepare: false,
+    max: 1,
+    connect_timeout: 8,
+    onnotice: () => {},
+    ...(env.databaseUrl ? { ssl: "require" as const } : {}),
+  });
+if (process.env.NODE_ENV !== "production") globalForDb.__reelvaultSql = sql;
 
-export const db: DB = globalForDb.__reelvaultDb ?? open();
-if (process.env.NODE_ENV !== "production") globalForDb.__reelvaultDb = db;
-
+export const db = drizzle(sql, { schema });
 export { schema };
+
+export async function ensureSchema() {
+  if (!env.databaseUrl) {
+    throw new Error("DATABASE_URL is not set. Add the Supabase pooler URI to .env.");
+  }
+  if (!globalForDb.__reelvaultReady) {
+    globalForDb.__reelvaultReady = (async () => {
+      for (const statement of MIGRATION.split(";").map((s) => s.trim()).filter(Boolean)) {
+        await sql.unsafe(statement);
+      }
+    })();
+  }
+  await globalForDb.__reelvaultReady;
+}

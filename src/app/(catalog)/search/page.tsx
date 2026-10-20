@@ -14,8 +14,8 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
   const q = typeof params.q === "string" ? params.q : "";
   const genre = typeof params.genre === "string" ? params.genre : "";
 
-  const results = genre && !q ? listTitles({ genre }) : searchTitles(q);
-  const suggestions = !q && !genre ? listTitles({ limit: 12 }) : [];
+  const results = genre && !q ? await listTitles({ genre }) : await searchTitles(q);
+  const suggestions = !q && !genre ? await listTitles({ limit: 12 }) : [];
 
   return (
     <div className="px-4 pt-24 sm:px-8 lg:px-12">

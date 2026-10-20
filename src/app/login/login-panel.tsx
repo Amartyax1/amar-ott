@@ -24,6 +24,12 @@ function TelegramGlyph({ className }: { className?: string }) {
   );
 }
 
+declare global {
+  interface Window {
+    onTelegramAuth?: (user: Record<string, unknown>) => void;
+  }
+}
+
 export function LoginPanel({ mock, botUsername }: { mock: boolean; botUsername: string }) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>({ name: "idle" });
@@ -31,6 +37,41 @@ export function LoginPanel({ mock, botUsername }: { mock: boolean; botUsername: 
   const [showInvite, setShowInvite] = useState(false);
   const [devBusy, setDevBusy] = useState(false);
   const polling = useRef(false);
+  const widget = useRef<HTMLDivElement>(null);
+  const inviteRef = useRef(invite);
+  inviteRef.current = invite;
+
+  useEffect(() => {
+    if (mock || !botUsername || !widget.current) return;
+    widget.current.innerHTML = "";
+    window.onTelegramAuth = async (user) => {
+      const res = await fetch("/api/auth/telegram", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...user, inviteCode: inviteRef.current.trim() || undefined }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; name?: string };
+      if (!res.ok) {
+        toast.error(data.error ?? "Telegram login failed.");
+        return;
+      }
+      toast.success(`Welcome, ${data.name ?? "friend"}!`);
+      router.replace("/");
+      router.refresh();
+    };
+    const script = document.createElement("script");
+    script.src = "https://telegram.org/js/telegram-widget.js?22";
+    script.async = true;
+    script.setAttribute("data-telegram-login", botUsername);
+    script.setAttribute("data-size", "large");
+    script.setAttribute("data-radius", "8");
+    script.setAttribute("data-request-access", "write");
+    script.setAttribute("data-onauth", "onTelegramAuth(user)");
+    widget.current.append(script);
+    return () => {
+      delete window.onTelegramAuth;
+    };
+  }, [mock, botUsername, router]);
 
   const waitingToken = phase.name === "waiting" ? phase.login.token : null;
 
@@ -182,14 +223,16 @@ export function LoginPanel({ mock, botUsername }: { mock: boolean; botUsername: 
             </div>
           ) : null}
 
+          <div ref={widget} className="mt-6 flex justify-center" />
+
           <Button
             onClick={start}
             disabled={phase.name === "starting"}
-            size="lg"
-            className="mt-6 h-11 w-full bg-[#2AABEE] text-base text-white hover:bg-[#229ED9]"
+            variant="ghost"
+            className="mt-3 w-full"
           >
             {phase.name === "starting" ? <Loader2 className="animate-spin" /> : <TelegramGlyph className="size-5" />}
-            Log in with Telegram
+            Or confirm in the bot (works on localhost)
           </Button>
 
           {!showInvite ? (

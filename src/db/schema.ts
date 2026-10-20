@@ -1,34 +1,44 @@
 import { sql } from "drizzle-orm";
-import { integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  bigint,
+  boolean,
+  doublePrecision,
+  integer,
+  jsonb,
+  pgTable,
+  serial,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 
-const now = sql`(unixepoch() * 1000)`;
+const nowMs = sql`(extract(epoch from now()) * 1000)::bigint`;
+const tgId = (name: string) => bigint(name, { mode: "number" });
 
-export const titles = sqliteTable(
+export const titles = pgTable(
   "titles",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     kind: text("kind", { enum: ["movie", "show"] }).notNull(),
-    /** Normalized name (+ year for movies) used to group uploads into one title. */
     key: text("key").notNull(),
     name: text("name").notNull(),
     year: integer("year"),
     overview: text("overview"),
     posterUrl: text("poster_url"),
     backdropUrl: text("backdrop_url"),
-    genres: text("genres", { mode: "json" }).$type<string[]>().notNull().default(sql`'[]'`),
-    rating: real("rating"),
+    genres: jsonb("genres").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    rating: doublePrecision("rating"),
     tmdbId: integer("tmdb_id"),
-    hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
-    createdAt: integer("created_at").notNull().default(now),
-    updatedAt: integer("updated_at").notNull().default(now),
+    hidden: boolean("hidden").notNull().default(false),
+    createdAt: tgId("created_at").notNull().default(nowMs),
+    updatedAt: tgId("updated_at").notNull().default(nowMs),
   },
   (t) => [uniqueIndex("titles_kind_key").on(t.kind, t.key)],
 );
 
-export const episodes = sqliteTable(
+export const episodes = pgTable(
   "episodes",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     titleId: integer("title_id")
       .notNull()
       .references(() => titles.id, { onDelete: "cascade" }),
@@ -39,10 +49,10 @@ export const episodes = sqliteTable(
   (t) => [uniqueIndex("episodes_title_se").on(t.titleId, t.season, t.episode)],
 );
 
-export const files = sqliteTable(
+export const files = pgTable(
   "files",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     titleId: integer("title_id")
       .notNull()
       .references(() => titles.id, { onDelete: "cascade" }),
@@ -52,15 +62,15 @@ export const files = sqliteTable(
     mediaType: text("media_type", { enum: ["video", "document"] }).notNull(),
     fileName: text("file_name"),
     mimeType: text("mime_type"),
-    size: integer("size"),
+    size: tgId("size"),
     duration: integer("duration"),
     width: integer("width"),
     height: integer("height"),
-    vaultChatId: integer("vault_chat_id").notNull(),
+    vaultChatId: tgId("vault_chat_id").notNull(),
     vaultMessageId: integer("vault_message_id").notNull(),
     caption: text("caption"),
-    hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
-    createdAt: integer("created_at").notNull().default(now),
+    hidden: boolean("hidden").notNull().default(false),
+    createdAt: tgId("created_at").notNull().default(nowMs),
   },
   (t) => [
     uniqueIndex("files_unique_id").on(t.telegramFileUniqueId),
@@ -68,40 +78,38 @@ export const files = sqliteTable(
   ],
 );
 
-export const users = sqliteTable("users", {
-  /** Telegram user id; also the private chat id the bot sends to. */
-  id: integer("id").primaryKey(),
+export const users = pgTable("users", {
+  id: tgId("id").primaryKey(),
   firstName: text("first_name").notNull(),
   lastName: text("last_name"),
   username: text("username"),
-  createdAt: integer("created_at").notNull().default(now),
-  lastSeenAt: integer("last_seen_at").notNull().default(now),
+  createdAt: tgId("created_at").notNull().default(nowMs),
+  lastSeenAt: tgId("last_seen_at").notNull().default(nowMs),
 });
 
-export const loginTokens = sqliteTable("login_tokens", {
+export const loginTokens = pgTable("login_tokens", {
   token: text("token").primaryKey(),
-  /** Hash of the browser-bound nonce cookie, so only the requesting browser can claim the session. */
   browserHash: text("browser_hash").notNull(),
   inviteCode: text("invite_code"),
   status: text("status", { enum: ["pending", "confirmed", "denied", "consumed"] })
     .notNull()
     .default("pending"),
-  userId: integer("user_id"),
+  userId: tgId("user_id"),
   reason: text("reason"),
-  createdAt: integer("created_at").notNull().default(now),
-  expiresAt: integer("expires_at").notNull(),
+  createdAt: tgId("created_at").notNull().default(nowMs),
+  expiresAt: tgId("expires_at").notNull(),
 });
 
-export const invites = sqliteTable("invites", {
+export const invites = pgTable("invites", {
   code: text("code").primaryKey(),
-  createdAt: integer("created_at").notNull().default(now),
-  usedBy: integer("used_by"),
-  usedAt: integer("used_at"),
+  createdAt: tgId("created_at").notNull().default(nowMs),
+  usedBy: tgId("used_by"),
+  usedAt: tgId("used_at"),
 });
 
-export const sends = sqliteTable("sends", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  userId: integer("user_id").notNull(),
+export const sends = pgTable("sends", {
+  id: serial("id").primaryKey(),
+  userId: tgId("user_id").notNull(),
   fileId: integer("file_id")
     .notNull()
     .references(() => files.id, { onDelete: "cascade" }),
@@ -109,8 +117,8 @@ export const sends = sqliteTable("sends", {
     .notNull()
     .default("queued"),
   error: text("error"),
-  createdAt: integer("created_at").notNull().default(now),
-  sentAt: integer("sent_at"),
+  createdAt: tgId("created_at").notNull().default(nowMs),
+  sentAt: tgId("sent_at"),
 });
 
 export type Title = typeof titles.$inferSelect;

@@ -7,16 +7,16 @@ You upload movies and episodes to a private Telegram group shared by you and you
 Press **Send to Telegram** and the bot delivers a copy to that person's DM. Files are never re-uploaded: Telegram reuses the original `file_id`.
 
 ```
-you --upload--> vault group --update--> bot --index--> SQLite <-- website <-- friends
-                                         |
-                                         +-- send file to DM <--queue-------+
+you --upload--> vault group --update--> laptop bot --index--> Supabase <-- Vercel site <-- friends
+                                                                  |
+                                                                  +-- Send to Telegram DM (from the site)
 ```
 
 ## Stack
 
 - **Website:** Next.js 16 (App Router), TypeScript, Tailwind CSS 4, shadcn/ui
 - **Bot:** [grammY](https://grammy.dev), long polling, in the same repo (`src/bot`)
-- **Storage:** SQLite (`better-sqlite3` + Drizzle ORM), shared by both processes
+- **Storage:** Supabase Postgres (Drizzle ORM)
 - **Metadata:** optional [TMDB](https://www.themoviedb.org) lookups for posters, synopses, genres and ratings
 
 ## Run it locally
@@ -31,17 +31,11 @@ npm run dev
 
 Open http://localhost:4317.
 
-`npm run dev` starts two processes: the website (`dev:web`) and the bot plus delivery worker (`dev:bot`). Sends are queued in SQLite and delivered by the bot process, so keep both running.
+`npm run dev` starts two processes: the website (`dev:web`) and the indexing bot (`dev:bot`). Sends go out from the website immediately, so the bot is only needed while you upload.
 
 ### Demo mode
 
-With no `BOT_TOKEN`, the app:
-
-- seeds a fictional demo library
-- shows an "Enter the demo library" button instead of Telegram login
-- has the bot process print each "send" to the terminal
-
-Use it to see the UI before setting up Telegram.
+With no `BOT_TOKEN`, the app shows an "Enter the demo library" button instead of Telegram login, and prints each "send" to the terminal instead of delivering. Use it to see the UI before setting up Telegram.
 
 ## Connect Telegram
 
@@ -83,11 +77,7 @@ These work anywhere in the vault group:
 
 ## How login works
 
-1. On `/login` the site creates a one-time token and shows a `t.me/<bot>?start=login_<token>` link, plus a QR code on desktop.
-2. The friend taps **Start** in Telegram. The bot receives their Telegram id, which Telegram vouches for, and approves the token if they're allowed.
-3. The page, which has been polling, gets a signed session cookie. The token only works in the browser that requested it.
-
-Pressing **Start** also opens the chat, which Telegram requires before a bot can DM someone.
+On the production domain, friends can use the Telegram Login Widget (after `/setdomain` in BotFather). On localhost, they can still confirm via a `t.me/<bot>?start=login_<token>` deep link: the bot process must be running to receive that `/start`.
 
 **Who is allowed in:**
 
@@ -105,7 +95,7 @@ To revoke someone, delete their row from the `users` table.
 | --- | --- |
 | `npm run dev` | Website on port 4317, plus the bot in watch mode |
 | `npm run build && npm start` | Production build, plus the bot |
-| `npm run bot` | Bot and delivery worker only |
+| `npm run bot` | Indexing bot only (run while uploading) |
 | `npm test` | Parser unit tests (Vitest) |
 | `npm run lint` / `npm run typecheck` | ESLint / TypeScript |
 
@@ -114,16 +104,22 @@ To revoke someone, delete their row from the `users` table.
 ```
 src/
   app/(catalog)/        home, movies, shows, search, title/[id] (login required)
-  app/login/            Telegram deep-link login
-  app/api/              auth and send queue endpoints
-  bot/                  grammY bot and paced delivery worker
-  db/                   Drizzle schema, SQLite setup, demo seed
+  app/login/            Telegram Login Widget + deep-link fallback
+  app/api/              auth and send endpoints
+  bot/                  grammY indexing bot (laptop, while uploading)
+  db/                   Drizzle schema and Postgres connection
   lib/parse.ts          caption / file-name parser (+ tests)
   lib/catalog.ts        indexing and catalog queries
   lib/access.ts         login tokens, allowlist, invites
-  lib/sends.ts          per-user rate limit and delivery queue
+  lib/sends.ts          per-user rate limit and immediate delivery
 ```
 
 ## Deploying
 
-Run it anywhere that supports a long-running Node process and a persistent disk, such as a VPS, Fly.io or Railway. Serverless hosts are not a fit because of the long-polling bot and SQLite. Set `SITE_URL` to your https URL so cookies are marked secure. Only upload content you have the rights to share.
+The website can run on Vercel (Hobby). Catalog and login live in Supabase Postgres. Sending a file is a Telegram Bot API call from the Vercel route — the laptop does not need to stay on.
+
+Run `npm run bot` on your laptop **only when you upload** to the vault group, so new titles get indexed.
+
+Set these on Vercel: `BOT_TOKEN`, `BOT_USERNAME`, `VAULT_CHAT_ID`, `SESSION_SECRET`, `DATABASE_URL`, `SITE_URL=https://your-app.vercel.app`. In BotFather, `/setdomain` to that host (no `https://`).
+
+Only upload content you have the rights to share.

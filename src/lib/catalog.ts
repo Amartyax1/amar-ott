@@ -1,5 +1,5 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
+import { and, eq, sql } from "drizzle-orm";
+import { db, ensureSchema } from "@/db";
 import { episodes, files, titles, type Episode, type FileRow, type Title } from "@/db/schema";
 import { parseMedia, titleKey, type ParsedMedia } from "@/lib/parse";
 import { lookupTmdb } from "@/lib/tmdb";
@@ -9,61 +9,72 @@ export type TitleCard = Pick<
   "id" | "kind" | "name" | "year" | "overview" | "posterUrl" | "backdropUrl" | "genres" | "rating"
 > & { addedAt: number; fileCount: number; seasonCount: number };
 
-type CardRow = Omit<TitleCard, "genres"> & { genres: string };
-
-const CARD_SELECT = `
-  SELECT t.id, t.kind, t.name, t.year, t.overview, t.poster_url AS posterUrl, t.backdrop_url AS backdropUrl,
-         t.genres, t.rating, MAX(f.created_at) AS addedAt, COUNT(f.id) AS fileCount,
-         COUNT(DISTINCT e.season) AS seasonCount
-  FROM titles t
-  JOIN files f ON f.title_id = t.id AND f.hidden = 0
-  LEFT JOIN episodes e ON e.id = f.episode_id
-  WHERE t.hidden = 0`;
+type CardRow = Omit<TitleCard, "genres"> & { genres: string[] | string };
 
 function toCard(row: CardRow): TitleCard {
-  return { ...row, genres: JSON.parse(row.genres || "[]") };
+  const genres = Array.isArray(row.genres) ? row.genres : JSON.parse(row.genres || "[]");
+  return { ...row, genres, addedAt: Number(row.addedAt), fileCount: Number(row.fileCount), seasonCount: Number(row.seasonCount) };
 }
 
-export function listTitles(opts: { kind?: "movie" | "show"; limit?: number; genre?: string } = {}): TitleCard[] {
-  const where: string[] = [];
-  const params: unknown[] = [];
-  if (opts.kind) {
-    where.push("t.kind = ?");
-    params.push(opts.kind);
-  }
-  if (opts.genre) {
-    where.push("EXISTS (SELECT 1 FROM json_each(t.genres) g WHERE g.value = ?)");
-    params.push(opts.genre);
-  }
-  const query = `${CARD_SELECT} ${where.map((w) => `AND ${w}`).join(" ")}
-    GROUP BY t.id ORDER BY addedAt DESC LIMIT ?`;
-  params.push(opts.limit ?? 500);
-  return (db.$client.prepare(query).all(...params) as CardRow[]).map(toCard);
+function cardQuery(extra: ReturnType<typeof sql>, limit: number) {
+  return sql`
+    SELECT t.id, t.kind, t.name, t.year, t.overview, t.poster_url AS "posterUrl", t.backdrop_url AS "backdropUrl",
+           t.genres, t.rating, MAX(f.created_at) AS "addedAt", COUNT(f.id)::int AS "fileCount",
+           COUNT(DISTINCT e.season)::int AS "seasonCount"
+    FROM titles t
+    JOIN files f ON f.title_id = t.id AND f.hidden = false
+    LEFT JOIN episodes e ON e.id = f.episode_id
+    WHERE t.hidden = false
+    ${extra}
+    GROUP BY t.id ORDER BY MAX(f.created_at) DESC LIMIT ${limit}
+  `;
 }
 
-export function searchTitles(q: string, limit = 60): TitleCard[] {
+export async function listTitles(opts: { kind?: "movie" | "show"; limit?: number; genre?: string } = {}): Promise<TitleCard[]> {
+  await ensureSchema();
+  const extra = sql`
+    ${opts.kind ? sql`AND t.kind = ${opts.kind}` : sql``}
+    ${opts.genre ? sql`AND t.genres @> ${JSON.stringify([opts.genre])}::jsonb` : sql``}
+  `;
+  const rows = await db.execute(cardQuery(extra, opts.limit ?? 500));
+  return ([...rows] as unknown as CardRow[]).map(toCard);
+}
+
+export async function searchTitles(q: string, limit = 60): Promise<TitleCard[]> {
+  await ensureSchema();
   const term = q.trim();
   if (!term) return [];
   const like = `%${term.replace(/[%_]/g, (c) => `\\${c}`)}%`;
-  const query = `${CARD_SELECT}
-    AND (t.name LIKE ? ESCAPE '\\' OR t.key LIKE ? ESCAPE '\\' OR t.overview LIKE ? ESCAPE '\\' OR t.genres LIKE ? ESCAPE '\\')
-    GROUP BY t.id
-    ORDER BY (t.name LIKE ? ESCAPE '\\') DESC, addedAt DESC LIMIT ?`;
   const key = `%${titleKey(term)}%`;
-  return (db.$client.prepare(query).all(like, key, like, like, `${term}%`, limit) as CardRow[]).map(toCard);
+  const prefix = `${term}%`;
+  const extra = sql`
+    AND (t.name ILIKE ${like} ESCAPE '\\' OR t.key LIKE ${key} ESCAPE '\\' OR t.overview ILIKE ${like} ESCAPE '\\' OR t.genres::text ILIKE ${like} ESCAPE '\\')
+  `;
+  const rows = await db.execute(sql`
+    SELECT t.id, t.kind, t.name, t.year, t.overview, t.poster_url AS "posterUrl", t.backdrop_url AS "backdropUrl",
+           t.genres, t.rating, MAX(f.created_at) AS "addedAt", COUNT(f.id)::int AS "fileCount",
+           COUNT(DISTINCT e.season)::int AS "seasonCount"
+    FROM titles t
+    JOIN files f ON f.title_id = t.id AND f.hidden = false
+    LEFT JOIN episodes e ON e.id = f.episode_id
+    WHERE t.hidden = false
+    ${extra}
+    GROUP BY t.id
+    ORDER BY (t.name ILIKE ${prefix} ESCAPE '\\') DESC, MAX(f.created_at) DESC LIMIT ${limit}
+  `);
+  return ([...rows] as unknown as CardRow[]).map(toCard);
 }
 
-/** Genres that have enough titles to deserve their own row on the home page. */
-export function topGenres(minTitles = 3, max = 6): string[] {
-  const rows = db.$client
-    .prepare(
-      `SELECT g.value AS genre, COUNT(DISTINCT t.id) AS n
-       FROM titles t, json_each(t.genres) g
-       WHERE t.hidden = 0 AND EXISTS (SELECT 1 FROM files f WHERE f.title_id = t.id AND f.hidden = 0)
-       GROUP BY g.value HAVING n >= ? ORDER BY n DESC LIMIT ?`,
-    )
-    .all(minTitles, max) as { genre: string }[];
-  return rows.map((r) => r.genre);
+export async function topGenres(minTitles = 3, max = 6): Promise<string[]> {
+  await ensureSchema();
+  const rows = await db.execute(sql`
+    SELECT g AS genre, COUNT(DISTINCT t.id)::int AS n
+    FROM titles t, jsonb_array_elements_text(t.genres) g
+    WHERE t.hidden = false AND EXISTS (SELECT 1 FROM files f WHERE f.title_id = t.id AND f.hidden = false)
+    GROUP BY g HAVING COUNT(DISTINCT t.id) >= ${minTitles}
+    ORDER BY n DESC LIMIT ${max}
+  `);
+  return ([...rows] as unknown as { genre: string }[]).map((r) => r.genre);
 }
 
 export type FileVersion = Pick<
@@ -97,24 +108,19 @@ function toVersion(row: FileVersion & { episodeId: number | null }): FileVersion
   return version;
 }
 
-export function getTitle(id: number): TitleDetail | null {
-  const title = db.select().from(titles).where(and(eq(titles.id, id), eq(titles.hidden, false))).get();
+export async function getTitle(id: number): Promise<TitleDetail | null> {
+  await ensureSchema();
+  const [title] = await db.select().from(titles).where(and(eq(titles.id, id), eq(titles.hidden, false))).limit(1);
   if (!title) return null;
 
-  const rows = db
+  const rows = await db
     .select(VERSION_COLUMNS)
     .from(files)
     .where(and(eq(files.titleId, id), eq(files.hidden, false)))
-    .orderBy(files.createdAt)
-    .all();
+    .orderBy(files.createdAt);
   if (!rows.length) return null;
 
-  const eps = db
-    .select()
-    .from(episodes)
-    .where(eq(episodes.titleId, id))
-    .orderBy(episodes.season, episodes.episode)
-    .all();
+  const eps = await db.select().from(episodes).where(eq(episodes.titleId, id)).orderBy(episodes.season, episodes.episode);
 
   const bySeason = new Map<number, EpisodeWithFiles[]>();
   for (const ep of eps) {
@@ -131,9 +137,6 @@ export function getTitle(id: number): TitleDetail | null {
     seasons: [...bySeason.entries()].map(([season, episodes]) => ({ season, episodes })),
   };
 }
-
-// ---------------------------------------------------------------------------
-// Indexing (used by the bot)
 
 export type UploadInfo = {
   telegramFileId: string;
@@ -159,17 +162,16 @@ function fallbackParse(upload: Pick<UploadInfo, "fileName" | "vaultMessageId">):
 async function upsertTitle(parsed: ParsedMedia): Promise<Title> {
   const kind = parsed.kind === "movie" ? "movie" : "show";
   const name = parsed.kind === "movie" ? parsed.title : parsed.show;
-  // Movies are grouped by name + year (remakes differ); shows by name only so uploads without a year still group.
   const key = titleKey(name, kind === "movie" ? parsed.year : null);
 
-  const existing = db.select().from(titles).where(and(eq(titles.kind, kind), eq(titles.key, key))).get();
+  const [existing] = await db.select().from(titles).where(and(eq(titles.kind, kind), eq(titles.key, key))).limit(1);
   if (existing) {
-    if (existing.hidden) db.update(titles).set({ hidden: false }).where(eq(titles.id, existing.id)).run();
+    if (existing.hidden) await db.update(titles).set({ hidden: false }).where(eq(titles.id, existing.id));
     return existing;
   }
 
   const meta = await lookupTmdb(kind, name, parsed.year);
-  return db
+  const [row] = await db
     .insert(titles)
     .values({
       kind,
@@ -184,95 +186,98 @@ async function upsertTitle(parsed: ParsedMedia): Promise<Title> {
       tmdbId: meta?.tmdbId,
     })
     .onConflictDoUpdate({ target: [titles.kind, titles.key], set: { updatedAt: Date.now() } })
-    .returning()
-    .get();
+    .returning();
+  return row;
 }
 
-function upsertEpisode(titleId: number, parsed: ParsedMedia): Episode | null {
+async function upsertEpisode(titleId: number, parsed: ParsedMedia): Promise<Episode | null> {
   if (parsed.kind !== "episode") return null;
-  const found = db
+  const [found] = await db
     .select()
     .from(episodes)
     .where(and(eq(episodes.titleId, titleId), eq(episodes.season, parsed.season), eq(episodes.episode, parsed.episode)))
-    .get();
+    .limit(1);
   if (found) {
     if (!found.name && parsed.episodeTitle) {
-      db.update(episodes).set({ name: parsed.episodeTitle }).where(eq(episodes.id, found.id)).run();
+      await db.update(episodes).set({ name: parsed.episodeTitle }).where(eq(episodes.id, found.id));
       return { ...found, name: parsed.episodeTitle };
     }
     return found;
   }
-  return db
+  const [row] = await db
     .insert(episodes)
     .values({ titleId, season: parsed.season, episode: parsed.episode, name: parsed.episodeTitle })
-    .returning()
-    .get();
+    .returning();
+  return row;
 }
 
-function touch(titleId: number) {
-  db.update(titles).set({ updatedAt: Date.now() }).where(eq(titles.id, titleId)).run();
+async function touch(titleId: number) {
+  await db.update(titles).set({ updatedAt: Date.now() }).where(eq(titles.id, titleId));
 }
 
-/** Remove titles/episodes that no longer have any files attached. */
-export function pruneOrphans() {
-  db.$client.exec(`
+export async function pruneOrphans() {
+  await db.execute(sql`
     DELETE FROM episodes WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.episode_id = episodes.id);
     DELETE FROM titles WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.title_id = titles.id);
   `);
 }
 
 export async function indexUpload(upload: UploadInfo): Promise<IndexResult> {
-  const dup = db.select().from(files).where(eq(files.telegramFileUniqueId, upload.telegramFileUniqueId)).get();
+  await ensureSchema();
+  const [dup] = await db.select().from(files).where(eq(files.telegramFileUniqueId, upload.telegramFileUniqueId)).limit(1);
   if (dup) {
-    const title = db.select().from(titles).where(eq(titles.id, dup.titleId)).get()!;
+    const [title] = await db.select().from(titles).where(eq(titles.id, dup.titleId)).limit(1);
     const episode = dup.episodeId
-      ? (db.select().from(episodes).where(eq(episodes.id, dup.episodeId)).get() ?? null)
+      ? ((await db.select().from(episodes).where(eq(episodes.id, dup.episodeId)).limit(1))[0] ?? null)
       : null;
-    return { file: dup, title, episode, duplicate: true };
+    return { file: dup, title: title!, episode, duplicate: true };
   }
 
   const parsed = parseMedia(upload.caption, upload.fileName) ?? fallbackParse(upload);
   const title = await upsertTitle(parsed);
-  const episode = upsertEpisode(title.id, parsed);
-  const file = db
+  const episode = await upsertEpisode(title.id, parsed);
+  const [file] = await db
     .insert(files)
     .values({ ...upload, titleId: title.id, episodeId: episode?.id ?? null })
-    .returning()
-    .get();
-  touch(title.id);
+    .returning();
+  await touch(title.id);
   return { file, title, episode, duplicate: false };
 }
 
-export function getFileById(id: number): FileRow | undefined {
-  return db.select().from(files).where(and(eq(files.id, id), eq(files.hidden, false))).get();
+export async function getFileById(id: number): Promise<FileRow | undefined> {
+  await ensureSchema();
+  const [row] = await db.select().from(files).where(and(eq(files.id, id), eq(files.hidden, false))).limit(1);
+  return row;
 }
 
-export function findVaultFile(vaultChatId: number, vaultMessageId: number): FileRow | undefined {
-  return db
+export async function findVaultFile(vaultChatId: number, vaultMessageId: number): Promise<FileRow | undefined> {
+  await ensureSchema();
+  const [row] = await db
     .select()
     .from(files)
     .where(and(eq(files.vaultChatId, vaultChatId), eq(files.vaultMessageId, vaultMessageId)))
-    .get();
+    .limit(1);
+  return row;
 }
 
-/** Move an indexed file to a different title/episode (owner correction). */
 export async function retagFile(fileId: number, parsed: ParsedMedia): Promise<IndexResult> {
+  await ensureSchema();
   const title = await upsertTitle(parsed);
-  const episode = upsertEpisode(title.id, parsed);
-  const file = db
+  const episode = await upsertEpisode(title.id, parsed);
+  const [file] = await db
     .update(files)
     .set({ titleId: title.id, episodeId: episode?.id ?? null, hidden: false })
     .where(eq(files.id, fileId))
-    .returning()
-    .get();
-  touch(title.id);
-  pruneOrphans();
+    .returning();
+  await touch(title.id);
+  await pruneOrphans();
   return { file, title, episode, duplicate: false };
 }
 
-export function removeFile(fileId: number) {
-  db.delete(files).where(eq(files.id, fileId)).run();
-  pruneOrphans();
+export async function removeFile(fileId: number) {
+  await ensureSchema();
+  await db.delete(files).where(eq(files.id, fileId));
+  await pruneOrphans();
 }
 
 export function describeMedia(result: Pick<IndexResult, "title" | "episode">): string {
@@ -283,13 +288,14 @@ export function describeMedia(result: Pick<IndexResult, "title" | "episode">): s
   return `${title.name} ${se}${episode.name ? ` - ${episode.name}` : ""}`;
 }
 
-export function catalogStats() {
-  return db.$client
-    .prepare(
-      `SELECT
-         (SELECT COUNT(*) FROM titles WHERE kind = 'movie') AS movies,
-         (SELECT COUNT(*) FROM titles WHERE kind = 'show') AS shows,
-         (SELECT COUNT(*) FROM files) AS files`,
-    )
-    .get() as { movies: number; shows: number; files: number };
+export async function catalogStats() {
+  await ensureSchema();
+  const rows = await db.execute(sql`
+    SELECT
+      (SELECT COUNT(*)::int FROM titles WHERE kind = 'movie') AS movies,
+      (SELECT COUNT(*)::int FROM titles WHERE kind = 'show') AS shows,
+      (SELECT COUNT(*)::int FROM files) AS files
+  `);
+  const row = ([...rows] as unknown as { movies: number; shows: number; files: number }[])[0];
+  return { movies: Number(row.movies), shows: Number(row.shows), files: Number(row.files) };
 }

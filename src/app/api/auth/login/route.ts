@@ -17,7 +17,7 @@ export async function POST(req: Request) {
 
   const nonce = crypto.randomBytes(24).toString("base64url");
   await setLoginNonce(nonce);
-  const { token, expiresAt } = createLoginToken(nonce, body.data.inviteCode);
+  const { token, expiresAt } = await createLoginToken(nonce, body.data.inviteCode);
   const payload = `login_${token}`;
   return NextResponse.json({
     token,
@@ -33,7 +33,7 @@ export async function GET(req: Request) {
   const nonce = await getLoginNonce();
   if (!token || !nonce) return NextResponse.json({ status: "invalid" });
 
-  const result = claimLogin(token, nonce);
+  const result = await claimLogin(token, nonce);
   if (result.status === "ok") {
     await createSession(result.user.id);
     return NextResponse.json({ status: "ok", name: result.user.firstName });

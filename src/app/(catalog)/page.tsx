@@ -7,7 +7,7 @@ import { getTitle, listTitles, topGenres } from "@/lib/catalog";
 
 export default async function HomePage() {
   await connection();
-  const recent = listTitles({ limit: 20 });
+  const recent = await listTitles({ limit: 20 });
 
   if (!recent.length) {
     return (
@@ -21,10 +21,11 @@ export default async function HomePage() {
     );
   }
 
-  const featured = getTitle((recent.find((t) => t.backdropUrl) ?? recent[0]).id);
-  const movies = listTitles({ kind: "movie", limit: 20 });
-  const shows = listTitles({ kind: "show", limit: 20 });
-  const genres = topGenres().map((genre) => ({ genre, titles: listTitles({ genre, limit: 20 }) }));
+  const featured = await getTitle((recent.find((t) => t.backdropUrl) ?? recent[0]).id);
+  const movies = await listTitles({ kind: "movie", limit: 20 });
+  const shows = await listTitles({ kind: "show", limit: 20 });
+  const genreNames = await topGenres();
+  const genres = await Promise.all(genreNames.map(async (genre) => ({ genre, titles: await listTitles({ genre, limit: 20 }) })));
   const topRated = [...recent, ...movies, ...shows]
     .filter((t, i, all) => t.rating && all.findIndex((x) => x.id === t.id) === i)
     .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))

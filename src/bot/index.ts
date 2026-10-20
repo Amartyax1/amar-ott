@@ -3,6 +3,7 @@ import { Bot, GrammyError, type Context } from "grammy";
 import type { Message } from "grammy/types";
 import { env, isMock } from "@/lib/env";
 import { confirmLogin, createInvite } from "@/lib/access";
+import { ensureSchema } from "@/db";
 import {
   catalogStats,
   describeMedia,
@@ -13,7 +14,6 @@ import {
   type UploadInfo,
 } from "@/lib/catalog";
 import { isVideoFile, parseMedia } from "@/lib/parse";
-import { runSendWorker } from "./worker";
 
 const controller = new AbortController();
 
@@ -86,16 +86,6 @@ async function start() {
     console.warn("[bot] VAULT_CHAT_ID is not set. Add the bot to your vault group and send /chatid there.");
   }
 
-  async function isVaultMember(userId: number): Promise<boolean> {
-    if (env.vaultChatId === null) return false;
-    try {
-      const m = await bot.api.getChatMember(env.vaultChatId, userId);
-      return ["creator", "administrator", "member", "restricted"].includes(m.status);
-    } catch {
-      return false;
-    }
-  }
-
   const quietReply = (ctx: Context, text: string) =>
     ctx.reply(text, {
       disable_notification: true,
@@ -108,28 +98,36 @@ async function start() {
     ctx.reply(`This chat's id is ${ctx.chat.id}${isVault(ctx) ? " (this is your vault)" : ""}.`),
   );
 
-  // --- private chats: login & welcome ---------------------------------------
-
-  const privateChat = bot.chatType("private");
-
-  privateChat.command("start", async (ctx) => {
+  bot.command("start", async (ctx) => {
+    const from = ctx.from;
+    if (!from) return;
     const payload = ctx.match.trim();
     if (payload.startsWith("login_")) {
-      const result = confirmLogin(payload.slice("login_".length), ctx.from, await isVaultMember(ctx.from.id));
-      if (!result.ok) return ctx.reply(result.message);
-      return ctx.reply(
-        `You're logged in, ${result.user.firstName}. Head back to the website - it will continue on its own.\n\n` +
-          "Anything you pick there will be sent to this chat.",
-      );
+      try {
+        const result = await confirmLogin(payload.slice("login_".length), from);
+        if (!result.ok) return ctx.reply(result.message);
+        return ctx.reply(
+          `You're logged in, ${result.user.firstName}. Head back to the website - it will continue on its own.\n\n` +
+            "Anything you pick there will be sent to this chat.",
+        );
+      } catch (err) {
+        console.error("[bot] login failed", err);
+        return ctx.reply("I couldn't finish login (database is not configured). Set DATABASE_URL in .env and restart.");
+      }
     }
     return ctx.reply(
-      `Hi ${ctx.from.first_name}! I deliver movies and shows from the ReelVault library.\n\n` +
-        `Browse and pick something at ${env.siteUrl} and I'll send it right here.`,
+      `Hi ${from.first_name}! I deliver movies and shows from the ReelVault library.\n\n` +
+        `Open a private chat with me, browse ${env.siteUrl}, and I'll send files here.\n\n` +
+        `This chat's id is ${ctx.chat.id}${isVault(ctx) ? " (this is your vault)" : ""}.`,
     );
   });
 
-  privateChat.command("help", (ctx) =>
-    ctx.reply(`Pick a movie or episode at ${env.siteUrl} and press "Send to Telegram". It will show up in this chat.`),
+  bot.command("help", (ctx) =>
+    ctx.reply(
+      ctx.chat.type === "private"
+        ? `Pick a movie or episode at ${env.siteUrl} and press "Send to Telegram". It will show up in this chat.`
+        : HELP_VAULT,
+    ),
   );
 
   // --- vault: indexing -------------------------------------------------------
@@ -165,16 +163,16 @@ async function start() {
 
   // --- vault: owner commands -------------------------------------------------
 
-  function repliedFile(ctx: Context) {
+  async function repliedFile(ctx: Context) {
     const target = ctx.msg?.reply_to_message;
     if (!target || env.vaultChatId === null) return null;
-    return findVaultFile(env.vaultChatId, target.message_id) ?? null;
+    return (await findVaultFile(env.vaultChatId, target.message_id)) ?? null;
   }
 
   const vault = bot.filter(isVault);
 
   vault.command(["title", "movie", "tv"], async (ctx) => {
-    const file = repliedFile(ctx);
+    const file = await repliedFile(ctx);
     if (!file) return quietReply(ctx, "Reply to an indexed file with this command.");
     const parsed = parseMedia(ctx.match, null);
     const wantsEpisode = ctx.message?.text?.startsWith("/tv") ?? false;
@@ -186,21 +184,21 @@ async function start() {
   });
 
   vault.command("delete", async (ctx) => {
-    const file = repliedFile(ctx);
+    const file = await repliedFile(ctx);
     if (!file) return quietReply(ctx, "Reply to an indexed file with /delete.");
-    removeFile(file.id);
+    await removeFile(file.id);
     return quietReply(ctx, "Removed from the website. The message in this chat is untouched.");
   });
 
-  vault.command("invite", (ctx) => {
-    const code = createInvite();
+  vault.command("invite", async (ctx) => {
+    const code = await createInvite();
     return ctx.reply(
       `Invite code: ${code}\n\nShare it with one friend. They enter it on the login page at ${env.siteUrl}/login. It works once.`,
     );
   });
 
-  vault.command("stats", (ctx) => {
-    const s = catalogStats();
+  vault.command("stats", async (ctx) => {
+    const s = await catalogStats();
     return ctx.reply(`${s.movies} movies, ${s.shows} shows, ${s.files} files indexed.`);
   });
 
@@ -219,9 +217,13 @@ async function start() {
   process.once("SIGINT", () => shutdown(() => bot.stop()));
   process.once("SIGTERM", () => shutdown(() => bot.stop()));
 
-  void runSendWorker(bot.api, controller.signal);
+  try {
+    await ensureSchema();
+  } catch (err) {
+    console.error("[bot] database not ready (indexing and login will fail until DATABASE_URL is set):", err);
+  }
   console.log(
-    `[bot] @${me.username} is running. Vault: ${env.vaultChatId ?? "not set"}. Login links: t.me/${me.username}?start=login_...`,
+    `[bot] @${me.username} is running. Vault: ${env.vaultChatId ?? "not set"}.`,
   );
   await bot.start({
     allowed_updates: ["message", "channel_post"],
@@ -235,7 +237,8 @@ if (isMock) {
   );
   process.once("SIGINT", () => shutdown());
   process.once("SIGTERM", () => shutdown());
-  void runSendWorker(null, controller.signal);
 } else {
-  void start();
+  void start().catch((err) => {
+    console.error("[bot] failed to start:", err);
+  });
 }

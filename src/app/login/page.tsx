@@ -13,7 +13,7 @@ export const metadata: Metadata = { title: "Log in" };
 export default async function LoginPage() {
   await connection();
   if (await getSessionUser()) redirect("/");
-  const wall = listTitles({ limit: 24 });
+  const wall = await listTitles({ limit: 24 });
 
   return (
     <div className="relative isolate flex min-h-svh flex-col overflow-hidden">

@@ -44,7 +44,7 @@ export async function getSessionUser(): Promise<User | null> {
   try {
     const { payload } = await jwtVerify(token, secret, { algorithms: ["HS256"] });
     // Deleting a row from `users` revokes access immediately.
-    return getUser(Number(payload.sub)) ?? null;
+    return (await getUser(Number(payload.sub))) ?? null;
   } catch {
     return null;
   }
