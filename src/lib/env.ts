@@ -4,7 +4,7 @@ export const env = {
   vaultChatId: process.env.VAULT_CHAT_ID ? Number(process.env.VAULT_CHAT_ID) : null,
   sessionSecret: process.env.SESSION_SECRET?.trim() || "",
   tmdbKey: process.env.TMDB_API_KEY?.trim() || "",
-  siteUrl: process.env.SITE_URL?.trim() || "http://localhost:4317",
+  siteUrl: process.env.SITE_URL?.trim() || "https://amar-ott.vercel.app",
   databaseUrl: process.env.DATABASE_URL?.trim() || "",
   sendLimitPerHour: Number(process.env.SEND_LIMIT_PER_HOUR ?? 40),
 };

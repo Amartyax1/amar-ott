@@ -4,7 +4,7 @@ A private movie and TV site. The films live in a Telegram group. People browse t
 
 ## Watch something
 
-1. Open the website.
+1. Open https://amar-ott.vercel.app.
 2. Scan the code with your phone, or tap **Open in Telegram**.
 3. In the chat with the bot, tap **Start**.
 4. The site opens the library on its own. Pick a movie, an episode, or a whole season.

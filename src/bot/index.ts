@@ -2,18 +2,9 @@ import "./load-env";
 import { Bot, GrammyError, type Context } from "grammy";
 import type { Message } from "grammy/types";
 import { env, isMock } from "@/lib/env";
-import { confirmLogin } from "@/lib/access";
-import { ensureSchema } from "@/db";
-import {
-  catalogStats,
-  describeMedia,
-  findVaultFile,
-  indexUpload,
-  removeFile,
-  retagFile,
-  type UploadInfo,
-} from "@/lib/catalog";
+import { type UploadInfo } from "@/lib/catalog";
 import { isVideoFile, parseMedia } from "@/lib/parse";
+import { SiteError, confirmOnSite, deleteOnSite, findFileOnSite, indexOnSite, retagOnSite, statsOnSite } from "./site";
 
 const controller = new AbortController();
 
@@ -115,21 +106,26 @@ async function start() {
         console.error("[bot] login ack failed", err);
       }
       try {
-        const result = await confirmLogin(payload.slice("login_".length), from);
-        if (!result.ok) return ctx.reply(result.message);
+        const result = await confirmOnSite(payload.slice("login_".length), {
+          id: from.id,
+          first_name: from.first_name,
+          last_name: from.last_name,
+          username: from.username,
+        });
+        if (!result.ok) return ctx.reply(result.message ?? "Login didn't go through. Go back to the site and try again.");
         return ctx.reply(
-          `You're in, ${result.user.firstName}. Go back to the website — it will open on its own.\n\n` +
+          `You're in, ${result.name}. Go back to the website. It will open on its own.\n\n` +
             "Anything you pick there will be sent to this chat.",
         );
       } catch (err) {
         console.error("[bot] login failed", err);
-        return ctx.reply("I couldn't finish login (database is not configured). Set DATABASE_URL in .env and restart.");
+        const detail = err instanceof SiteError ? err.message : "Try again in a moment.";
+        return ctx.reply(`I couldn't finish login. ${detail}`);
       }
     }
     return ctx.reply(
-      `Hi ${from.first_name}! I deliver movies and shows from the ReelVault library.\n\n` +
-        `Open a private chat with me, browse ${env.siteUrl}, and I'll send files here.\n\n` +
-        `This chat's id is ${ctx.chat.id}${isVault(ctx) ? " (this is your vault)" : ""}.`,
+      `Hi ${from.first_name}. Open ${env.siteUrl} and tap Start from the login page. I'll sign you in here.\n\n` +
+        "After that, pick a movie on the site and I'll send it to this chat.",
     );
   });
 
@@ -154,8 +150,8 @@ async function start() {
     const upload = toUpload(msg);
     if (!upload) return;
     try {
-      const result = await indexUpload(upload);
-      const label = describeMedia(result);
+      const result = await indexOnSite(upload);
+      const label = result.label;
       console.log(`[bot] ${result.duplicate ? "duplicate" : "indexed"}: ${label}`);
       await quietReply(
         ctx,
@@ -177,7 +173,8 @@ async function start() {
   async function repliedFile(ctx: Context) {
     const target = ctx.msg?.reply_to_message;
     if (!target || env.vaultChatId === null) return null;
-    return (await findVaultFile(env.vaultChatId, target.message_id)) ?? null;
+    const found = await findFileOnSite(env.vaultChatId, target.message_id);
+    return found.id === null ? null : { id: found.id };
   }
 
   const vault = bot.filter(isVault);
@@ -185,24 +182,24 @@ async function start() {
   vault.command(["title", "movie", "tv"], async (ctx) => {
     const file = await repliedFile(ctx);
     if (!file) return quietReply(ctx, "Reply to an indexed file with this command.");
-    const parsed = parseMedia(ctx.match, null);
     const wantsEpisode = ctx.message?.text?.startsWith("/tv") ?? false;
+    const parsed = parseMedia(ctx.match, null);
     if (!parsed || (wantsEpisode && parsed.kind !== "episode")) {
       return quietReply(ctx, wantsEpisode ? "Usage: /tv Show Name S01E02" : "Usage: /title Movie Name (2010)");
     }
-    const result = await retagFile(file.id, parsed);
-    return quietReply(ctx, `Updated: ${describeMedia(result)}`);
+    const result = await retagOnSite(file.id, ctx.match, wantsEpisode);
+    return quietReply(ctx, `Updated: ${result.label}`);
   });
 
   vault.command("delete", async (ctx) => {
     const file = await repliedFile(ctx);
     if (!file) return quietReply(ctx, "Reply to an indexed file with /delete.");
-    await removeFile(file.id);
+    await deleteOnSite(file.id);
     return quietReply(ctx, "Removed from the website. The message in this chat is untouched.");
   });
 
   vault.command("stats", async (ctx) => {
-    const s = await catalogStats();
+    const s = await statsOnSite();
     return ctx.reply(`${s.movies} movies, ${s.shows} shows, ${s.files} files indexed.`);
   });
 
@@ -217,7 +214,7 @@ async function start() {
     const name = ctx.from?.first_name ?? "there";
     await ctx.reply(
       `Hi ${name}. I'm online.\n\n` +
-        `To sign in, open ${env.siteUrl}/login and scan the code, then tap Start in this chat. That's enough - you're in.\n\n` +
+        `To sign in, open ${env.siteUrl} and tap Start from the login page. That's enough.\n\n` +
         `After that, pick something on the site and I'll send it here.`,
     );
   });
@@ -235,13 +232,8 @@ async function start() {
   process.once("SIGINT", () => shutdown(() => bot.stop()));
   process.once("SIGTERM", () => shutdown(() => bot.stop()));
 
-  try {
-    await ensureSchema();
-  } catch (err) {
-    console.error("[bot] database not ready (indexing and login will fail until DATABASE_URL is set):", err);
-  }
   console.log(
-    `[bot] @${me.username} is running. Vault: ${env.vaultChatId ?? "not set"}.`,
+    `[bot] @${me.username} is running. Site: ${env.siteUrl}. Vault: ${env.vaultChatId ?? "not set"}.`,
   );
   await bot.start({
     allowed_updates: ["message", "channel_post"],
