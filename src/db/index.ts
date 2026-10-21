@@ -93,9 +93,13 @@ CREATE INDEX IF NOT EXISTS sends_status ON sends(status, id);
 CREATE INDEX IF NOT EXISTS sends_user_time ON sends(user_id, created_at);
 `;
 
+const POOL_MAX = 5;
+
 const globalForDb = globalThis as unknown as {
   __reelvaultSql?: ReturnType<typeof postgres>;
+  __reelvaultPoolMax?: number;
   __reelvaultReady?: Promise<void>;
+  __reelvaultSchemaOk?: boolean;
 };
 
 function connectionUrl() {
@@ -105,18 +109,31 @@ function connectionUrl() {
   return url.replace(/[?&]pgbouncer=true\b/, "").replace(/\?$/, "");
 }
 
-// Don't connect at import time. A missing DATABASE_URL used to crash the bot
-// before it could even poll Telegram, so /start never got a reply.
-const sql =
-  globalForDb.__reelvaultSql ??
-  postgres(connectionUrl(), {
+function createClient() {
+  return postgres(connectionUrl(), {
     prepare: false,
-    max: 1,
+    max: POOL_MAX,
+    // Skip the extra type-lookup query on every new connection.
+    fetch_types: false,
     connect_timeout: 8,
+    // 0 disables idle disconnect so login polls reuse warm connections.
+    idle_timeout: 0,
     onnotice: () => {},
     ...(env.databaseUrl ? { ssl: "require" as const } : {}),
   });
-if (process.env.NODE_ENV !== "production") globalForDb.__reelvaultSql = sql;
+}
+
+// Don't connect at import time. A missing DATABASE_URL used to crash the bot
+// before it could even poll Telegram, so /start never got a reply.
+// Dev HMR keeps the client on globalThis; replace it if the pool size changed
+// so a previously cached max:1 client does not survive this file reload.
+if (!globalForDb.__reelvaultSql || globalForDb.__reelvaultPoolMax !== POOL_MAX) {
+  void globalForDb.__reelvaultSql?.end({ timeout: 5 });
+  globalForDb.__reelvaultSql = createClient();
+  globalForDb.__reelvaultPoolMax = POOL_MAX;
+}
+
+const sql = globalForDb.__reelvaultSql;
 
 export const db = drizzle(sql, { schema });
 export { schema };
@@ -125,12 +142,23 @@ export async function ensureSchema() {
   if (!env.databaseUrl) {
     throw new Error("DATABASE_URL is not set. Add the Supabase pooler URI to .env.");
   }
-  if (!globalForDb.__reelvaultReady) {
-    globalForDb.__reelvaultReady = (async () => {
+  if (globalForDb.__reelvaultSchemaOk) return;
+
+  let pending = globalForDb.__reelvaultReady;
+  if (!pending) {
+    pending = (async () => {
       for (const statement of MIGRATION.split(";").map((s) => s.trim()).filter(Boolean)) {
         await sql.unsafe(statement);
       }
     })();
+    globalForDb.__reelvaultReady = pending;
   }
-  await globalForDb.__reelvaultReady;
+
+  try {
+    await pending;
+  } catch (err) {
+    if (globalForDb.__reelvaultReady === pending) globalForDb.__reelvaultReady = undefined;
+    throw err;
+  }
+  globalForDb.__reelvaultSchemaOk = true;
 }

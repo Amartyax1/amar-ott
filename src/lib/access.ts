@@ -1,9 +1,8 @@
 import crypto from "node:crypto";
-import { and, eq, isNull, lt } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db, ensureSchema } from "@/db";
-import { invites, loginTokens, users, type User } from "@/db/schema";
+import { loginTokens, users, type User } from "@/db/schema";
 import { env } from "@/lib/env";
-import { isVaultMember } from "@/lib/telegram";
 
 const LOGIN_TTL_MS = 10 * 60 * 1000;
 
@@ -32,15 +31,17 @@ export async function getUser(id: number): Promise<User | undefined> {
 
 export async function createLoginToken(browserNonce: string, inviteCode?: string | null) {
   await ensureSchema();
-  await db.delete(loginTokens).where(lt(loginTokens.expiresAt, Date.now() - LOGIN_TTL_MS));
   const token = crypto.randomBytes(16).toString("base64url");
   const expiresAt = Date.now() + LOGIN_TTL_MS;
-  await db.insert(loginTokens).values({
-    token,
-    browserHash: hashNonce(browserNonce),
-    inviteCode: inviteCode?.trim().toUpperCase() || null,
-    expiresAt,
-  });
+  const invite = inviteCode?.trim().toUpperCase() || null;
+  // One round-trip: drop long-dead tokens and insert the new one together.
+  await db.execute(sql`
+    WITH purged AS (
+      DELETE FROM login_tokens WHERE expires_at < ${Date.now() - LOGIN_TTL_MS}
+    )
+    INSERT INTO login_tokens (token, browser_hash, invite_code, expires_at)
+    VALUES (${token}, ${hashNonce(browserNonce)}, ${invite}, ${expiresAt})
+  `);
   return { token, expiresAt };
 }
 
@@ -51,62 +52,163 @@ export type ClaimResult =
 
 export async function claimLogin(token: string, browserNonce: string): Promise<ClaimResult> {
   await ensureSchema();
-  const [row] = await db.select().from(loginTokens).where(eq(loginTokens.token, token)).limit(1);
+  const [row] = await db
+    .select({
+      status: loginTokens.status,
+      browserHash: loginTokens.browserHash,
+      expiresAt: loginTokens.expiresAt,
+      reason: loginTokens.reason,
+      id: users.id,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      username: users.username,
+      createdAt: users.createdAt,
+      lastSeenAt: users.lastSeenAt,
+    })
+    .from(loginTokens)
+    .leftJoin(users, eq(users.id, loginTokens.userId))
+    .where(eq(loginTokens.token, token))
+    .limit(1);
   if (!row || row.browserHash !== hashNonce(browserNonce) || row.status === "consumed") return { status: "invalid" };
   if (row.status === "denied") return { status: "denied", reason: row.reason ?? "Access denied." };
   if (row.status === "pending") return row.expiresAt < Date.now() ? { status: "expired" } : { status: "pending" };
+  if (row.id == null || !row.firstName || row.createdAt == null || row.lastSeenAt == null) return { status: "invalid" };
 
-  const user = row.userId ? await getUser(row.userId) : undefined;
-  if (!user) return { status: "invalid" };
-  await db.update(loginTokens).set({ status: "consumed" }).where(eq(loginTokens.token, token));
+  const user: User = {
+    id: row.id,
+    firstName: row.firstName,
+    lastName: row.lastName,
+    username: row.username,
+    createdAt: row.createdAt,
+    lastSeenAt: row.lastSeenAt,
+  };
+  await db
+    .update(loginTokens)
+    .set({ status: "consumed" })
+    .where(and(eq(loginTokens.token, token), eq(loginTokens.status, "confirmed")));
   return { status: "ok", user };
 }
 
 export type ConfirmResult = { ok: true; user: User; isNew: boolean } | { ok: false; message: string };
 
-async function admit(profile: TelegramProfile, inviteCode?: string | null): Promise<ConfirmResult> {
-  const existing = await getUser(profile.id);
-  let allowed =
-    Boolean(existing) || env.openRegistration || env.allowedUserIds.includes(profile.id) || (await isVaultMember(profile.id));
+/** Anyone who confirms in Telegram is signed in. Scanning the login code is the whole check. */
+async function admit(profile: TelegramProfile): Promise<ConfirmResult> {
+  const now = Date.now();
+  const [user] = await db
+    .insert(users)
+    .values({
+      id: profile.id,
+      firstName: profile.first_name,
+      lastName: profile.last_name,
+      username: profile.username,
+      createdAt: now,
+      lastSeenAt: now,
+    })
+    .onConflictDoUpdate({
+      target: users.id,
+      set: {
+        firstName: profile.first_name,
+        lastName: profile.last_name ?? null,
+        username: profile.username ?? null,
+        lastSeenAt: now,
+      },
+    })
+    .returning();
+  return { ok: true, user, isNew: user.createdAt === now };
+}
 
-  if (!allowed && inviteCode) {
-    const [used] = await db
-      .update(invites)
-      .set({ usedBy: profile.id, usedAt: Date.now() })
-      .where(and(eq(invites.code, inviteCode.trim().toUpperCase()), isNull(invites.usedBy)))
-      .returning();
-    allowed = Boolean(used);
-  }
+type ConfirmRow = {
+  status: string | null;
+  expiresAt: string | number | null;
+  found: boolean;
+  id: string | number | null;
+  firstName: string | null;
+  lastName: string | null;
+  username: string | null;
+  createdAt: string | number | null;
+  lastSeenAt: string | number | null;
+  isNew: boolean | null;
+  confirmed: boolean;
+};
 
-  if (!allowed) {
-    return {
-      ok: false,
-      message: inviteCode
-        ? "That invite code is invalid or already used. Ask the owner for a new one."
-        : "You're not on the guest list yet. Ask the owner for an invite code.",
-    };
-  }
+function asNumber(value: string | number): number {
+  return typeof value === "number" ? value : Number(value);
+}
 
-  const user = await upsertUser(profile);
-  return { ok: true, user, isNew: !existing };
+function asBool(value: unknown): boolean {
+  return value === true || value === "t" || value === "true" || value === 1;
 }
 
 export async function confirmLogin(token: string, profile: TelegramProfile): Promise<ConfirmResult> {
   await ensureSchema();
-  const [row] = await db.select().from(loginTokens).where(eq(loginTokens.token, token)).limit(1);
-  if (!row) return { ok: false, message: "This login link is invalid. Go back to the website and try again." };
+  const now = Date.now();
+  // One round-trip: read the token, upsert the user, and mark it confirmed.
+  const rows = await db.execute<ConfirmRow>(sql`
+    WITH existing AS (
+      SELECT token, status, expires_at
+      FROM login_tokens
+      WHERE token = ${token}
+    ),
+    admitted AS (
+      INSERT INTO users (id, first_name, last_name, username, created_at, last_seen_at)
+      SELECT ${profile.id}::bigint, ${profile.first_name}, ${profile.last_name ?? null}, ${profile.username ?? null}, ${now}::bigint, ${now}::bigint
+      FROM existing
+      WHERE status = 'pending' AND expires_at >= ${now}::bigint
+      ON CONFLICT (id) DO UPDATE SET
+        first_name = EXCLUDED.first_name,
+        last_name = EXCLUDED.last_name,
+        username = EXCLUDED.username,
+        last_seen_at = EXCLUDED.last_seen_at
+      RETURNING id, first_name, last_name, username, created_at, last_seen_at,
+                (created_at = ${now}::bigint) AS is_new
+    ),
+    confirmed AS (
+      UPDATE login_tokens
+      SET status = 'confirmed', user_id = (SELECT id FROM admitted)
+      WHERE token = ${token}
+        AND status = 'pending'
+        AND expires_at >= ${now}::bigint
+        AND EXISTS (SELECT 1 FROM admitted)
+      RETURNING token
+    )
+    SELECT
+      e.status AS status,
+      e.expires_at AS "expiresAt",
+      (e.token IS NOT NULL) AS found,
+      a.id AS id,
+      a.first_name AS "firstName",
+      a.last_name AS "lastName",
+      a.username AS username,
+      a.created_at AS "createdAt",
+      a.last_seen_at AS "lastSeenAt",
+      a.is_new AS "isNew",
+      (c.token IS NOT NULL) AS confirmed
+    FROM (SELECT 1) AS anchor
+    LEFT JOIN existing e ON true
+    LEFT JOIN admitted a ON true
+    LEFT JOIN confirmed c ON true
+  `);
+  const row = [...rows][0];
+  if (!row || !asBool(row.found)) return { ok: false, message: "This login link is invalid. Go back to the website and try again." };
   if (row.status !== "pending") return { ok: false, message: "This login link was already used." };
-  if (row.expiresAt < Date.now()) {
+  if (row.expiresAt == null || asNumber(row.expiresAt) < now) {
     return { ok: false, message: "This login link expired. Go back to the website and press Log in again." };
   }
-
-  const result = await admit(profile, row.inviteCode);
-  if (!result.ok) {
-    await db.update(loginTokens).set({ status: "denied", reason: result.message }).where(eq(loginTokens.token, token));
-    return result;
+  if (!asBool(row.confirmed) || row.id == null || !row.firstName || row.createdAt == null || row.lastSeenAt == null) {
+    return { ok: false, message: "This login link was already used." };
   }
-  await db.update(loginTokens).set({ status: "confirmed", userId: result.user.id }).where(eq(loginTokens.token, token));
-  return result;
+  return {
+    ok: true,
+    isNew: asBool(row.isNew),
+    user: {
+      id: asNumber(row.id),
+      firstName: row.firstName,
+      lastName: row.lastName,
+      username: row.username,
+      createdAt: asNumber(row.createdAt),
+      lastSeenAt: asNumber(row.lastSeenAt),
+    },
+  };
 }
 
 /** Telegram Login Widget payload. Hash is HMAC-SHA256 of the other fields using SHA256(bot token). */
@@ -133,17 +235,13 @@ export function verifyTelegramWidget(data: TelegramWidgetAuth): boolean {
   return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(hash));
 }
 
-export async function loginWithTelegram(data: TelegramWidgetAuth, inviteCode?: string | null): Promise<ConfirmResult> {
+export async function loginWithTelegram(data: TelegramWidgetAuth): Promise<ConfirmResult> {
   await ensureSchema();
   if (!verifyTelegramWidget(data)) return { ok: false, message: "Telegram login could not be verified. Try again." };
-  return admit({ id: data.id, first_name: data.first_name, last_name: data.last_name, username: data.username }, inviteCode);
-}
-
-export async function createInvite(): Promise<string> {
-  await ensureSchema();
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.randomBytes(8);
-  const code = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
-  await db.insert(invites).values({ code });
-  return code;
+  return admit({
+    id: data.id,
+    first_name: data.first_name,
+    last_name: data.last_name,
+    username: data.username,
+  });
 }

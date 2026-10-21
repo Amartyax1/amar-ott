@@ -12,10 +12,14 @@ export function telegramApi() {
 
 export async function isVaultMember(userId: number): Promise<boolean> {
   if (env.vaultChatId === null) return false;
+  // A private-chat "vault" is stored as the owner's user id. getChatMember
+  // only works on groups/channels, so treat that id as the owner.
+  if (userId === env.vaultChatId) return true;
   try {
     const m = await telegramApi().getChatMember(env.vaultChatId, userId);
     return ["creator", "administrator", "member", "restricted"].includes(m.status);
-  } catch {
+  } catch (err) {
+    console.warn("[telegram] vault membership check failed:", err instanceof Error ? err.message : err);
     return false;
   }
 }

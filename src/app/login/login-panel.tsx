@@ -1,134 +1,123 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { ExternalLink, Loader2, Send, Sparkles, TicketCheck } from "lucide-react";
+import { ExternalLink, Loader2, Send, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 type Pending = { token: string; deepLink: string; appLink: string; expiresAt: number };
-type Phase =
-  | { name: "idle" }
-  | { name: "starting" }
-  | { name: "waiting"; login: Pending }
-  | { name: "error"; message: string };
+type Phase = { name: "starting" } | { name: "waiting"; login: Pending } | { name: "error"; message: string };
 
-function TelegramGlyph({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden className={className} fill="currentColor">
-      <path d="M21.94 4.3a1.5 1.5 0 0 0-1.63-.23L2.9 11.2a1.2 1.2 0 0 0 .09 2.24l4.3 1.43 1.66 5.2a1 1 0 0 0 1.67.4l2.44-2.39 4.3 3.17a1.5 1.5 0 0 0 2.35-.88l2.8-14.5a1.5 1.5 0 0 0-.57-1.57ZM9.9 14.46l-.45 3.53-1.2-3.8 9.54-6.3-7.9 6.57Z" />
-    </svg>
-  );
-}
+const STORAGE_KEY = "rv_pending_login";
 
-declare global {
-  interface Window {
-    onTelegramAuth?: (user: Record<string, unknown>) => void;
+function readPending(): Pending | null {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Pending;
+    if (!parsed?.token || !parsed.deepLink || parsed.expiresAt < Date.now() + 5_000) return null;
+    return parsed;
+  } catch {
+    return null;
   }
 }
 
 export function LoginPanel({ mock, botUsername }: { mock: boolean; botUsername: string }) {
   const router = useRouter();
-  const [phase, setPhase] = useState<Phase>({ name: "idle" });
-  const [invite, setInvite] = useState("");
-  const [showInvite, setShowInvite] = useState(false);
+  const [phase, setPhase] = useState<Phase>({ name: "starting" });
   const [devBusy, setDevBusy] = useState(false);
-  const polling = useRef(false);
-  const widget = useRef<HTMLDivElement>(null);
-  const inviteRef = useRef(invite);
-  inviteRef.current = invite;
+  const generation = useRef(0);
+  const refreshed = useRef(false);
+  const booted = useRef(false);
 
-  useEffect(() => {
-    if (mock || !botUsername || !widget.current) return;
-    widget.current.innerHTML = "";
-    window.onTelegramAuth = async (user) => {
-      const res = await fetch("/api/auth/telegram", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...user, inviteCode: inviteRef.current.trim() || undefined }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string; name?: string };
-      if (!res.ok) {
-        toast.error(data.error ?? "Telegram login failed.");
+  const begin = useCallback(async (forceNew = false) => {
+    const id = ++generation.current;
+    if (!forceNew) {
+      const saved = readPending();
+      if (saved) {
+        setPhase({ name: "waiting", login: saved });
         return;
       }
-      toast.success(`Welcome, ${data.name ?? "friend"}!`);
-      router.replace("/");
-      router.refresh();
-    };
-    const script = document.createElement("script");
-    script.src = "https://telegram.org/js/telegram-widget.js?22";
-    script.async = true;
-    script.setAttribute("data-telegram-login", botUsername);
-    script.setAttribute("data-size", "large");
-    script.setAttribute("data-radius", "8");
-    script.setAttribute("data-request-access", "write");
-    script.setAttribute("data-onauth", "onTelegramAuth(user)");
-    widget.current.append(script);
-    return () => {
-      delete window.onTelegramAuth;
-    };
-  }, [mock, botUsername, router]);
+    } else {
+      sessionStorage.removeItem(STORAGE_KEY);
+    }
+
+    setPhase({ name: "starting" });
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const data = await res.json();
+      if (id !== generation.current) return;
+      if (!res.ok) throw new Error(data.error ?? "Couldn't start login.");
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      setPhase({ name: "waiting", login: data as Pending });
+    } catch (err) {
+      if (id !== generation.current) return;
+      setPhase({ name: "error", message: (err as Error).message });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mock || booted.current) return;
+    booted.current = true;
+    void begin();
+  }, [mock, begin]);
 
   const waitingToken = phase.name === "waiting" ? phase.login.token : null;
 
   useEffect(() => {
     if (!waitingToken) return;
-    polling.current = true;
-    let timer: ReturnType<typeof setTimeout>;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
-      if (!polling.current) return;
+      if (!active) return;
       try {
         const res = await fetch(`/api/auth/login?token=${encodeURIComponent(waitingToken)}`, { cache: "no-store" });
         const data = (await res.json()) as { status: string; reason?: string; name?: string };
+        if (!active) return;
         if (data.status === "ok") {
-          polling.current = false;
+          active = false;
+          sessionStorage.removeItem(STORAGE_KEY);
           toast.success(`Welcome, ${data.name ?? "friend"}!`);
           router.replace("/");
           router.refresh();
           return;
         }
         if (data.status === "denied") {
+          active = false;
+          sessionStorage.removeItem(STORAGE_KEY);
           setPhase({ name: "error", message: data.reason ?? "Access denied." });
           return;
         }
         if (data.status === "expired" || data.status === "invalid") {
-          setPhase({ name: "error", message: "That login link expired. Start again to get a fresh one." });
+          active = false;
+          sessionStorage.removeItem(STORAGE_KEY);
+          if (!refreshed.current) {
+            refreshed.current = true;
+            void begin(true);
+            return;
+          }
+          setPhase({ name: "error", message: "That login code expired. Start again to get a fresh one." });
           return;
         }
       } catch {
         // Transient network error: keep polling.
       }
-      timer = setTimeout(poll, 1500);
+      if (active) timer = setTimeout(() => void poll(), 400);
     };
-    timer = setTimeout(poll, 1500);
+    void poll();
     return () => {
-      polling.current = false;
+      active = false;
       clearTimeout(timer);
     };
-  }, [waitingToken, router]);
-
-  async function start() {
-    setPhase({ name: "starting" });
-    try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ inviteCode: invite.trim() || undefined }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Couldn't start login.");
-      setPhase({ name: "waiting", login: data as Pending });
-      if (window.matchMedia("(pointer: coarse)").matches) window.location.href = data.deepLink;
-      else window.open(data.deepLink, "_blank", "noopener");
-    } catch (err) {
-      setPhase({ name: "error", message: (err as Error).message });
-    }
-  }
+  }, [waitingToken, router, begin]);
 
   async function devLogin() {
     setDevBusy(true);
@@ -164,15 +153,14 @@ export function LoginPanel({ mock, botUsername }: { mock: boolean; botUsername: 
         </>
       ) : phase.name === "waiting" ? (
         <div className="text-center">
-          <h1 className="text-2xl font-bold tracking-tight">Confirm in Telegram</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Tap <span className="font-semibold text-foreground">Start</span> in your chat with @{botUsername}. This page
-            continues automatically.
+          <h1 className="text-2xl font-bold tracking-tight">Scan to enter</h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            Scan this code, then tap <span className="font-semibold text-foreground">Start</span> in @{botUsername}.
+            That signs you in. This page opens the library on its own.
           </p>
-          <div className="mx-auto mt-6 hidden w-fit rounded-xl bg-white p-3 sm:block">
-            <QRCodeSVG value={phase.login.deepLink} size={168} level="M" />
+          <div className="mx-auto mt-6 w-fit rounded-xl bg-white p-3">
+            <QRCodeSVG value={phase.login.deepLink} size={196} level="M" />
           </div>
-          <p className="mt-3 hidden text-xs text-muted-foreground sm:block">Or scan with your phone camera</p>
           <div className="mt-6 flex flex-col gap-2">
             <a
               href={phase.login.deepLink}
@@ -181,75 +169,38 @@ export function LoginPanel({ mock, botUsername }: { mock: boolean; botUsername: 
               className={cn(buttonVariants({ size: "lg" }), "h-11 bg-[#2AABEE] text-base text-white hover:bg-[#229ED9]")}
             >
               <ExternalLink />
-              Open Telegram again
+              Open in Telegram
             </a>
-            <Button variant="ghost" onClick={() => setPhase({ name: "idle" })}>
-              Cancel
+            <Button variant="ghost" onClick={() => void begin(true)}>
+              Get a new code
             </Button>
           </div>
           <p className="mt-4 inline-flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin" />
-            Waiting for confirmation...
+            Waiting for you to tap Start...
           </p>
         </div>
-      ) : (
-        <>
-          <h1 className="text-2xl font-bold tracking-tight">Your movie night starts here</h1>
-          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            Log in with Telegram. Anything you pick gets delivered straight to your chat with the bot, ready to watch
-            or download.
+      ) : phase.name === "error" ? (
+        <div className="text-center">
+          <h1 className="text-2xl font-bold tracking-tight">Login didn&apos;t start</h1>
+          <p role="alert" className="mt-4 rounded-lg bg-destructive/10 px-3 py-2.5 text-sm text-destructive ring-1 ring-destructive/20">
+            {phase.message}
           </p>
-
-          {phase.name === "error" ? (
-            <p role="alert" className="mt-5 rounded-lg bg-destructive/10 px-3 py-2.5 text-sm text-destructive ring-1 ring-destructive/20">
-              {phase.message}
-            </p>
-          ) : null}
-
-          {showInvite ? (
-            <div className="mt-5">
-              <label htmlFor="invite" className="text-xs font-medium text-muted-foreground">
-                Invite code
-              </label>
-              <Input
-                id="invite"
-                value={invite}
-                onChange={(e) => setInvite(e.target.value.toUpperCase())}
-                placeholder="e.g. K7Q2MX9P"
-                autoComplete="off"
-                maxLength={32}
-                className="mt-1.5 h-10 font-mono tracking-widest uppercase"
-              />
-            </div>
-          ) : null}
-
-          <div ref={widget} className="mt-6 flex justify-center" />
-
-          <Button
-            onClick={start}
-            disabled={phase.name === "starting"}
-            variant="ghost"
-            className="mt-3 w-full"
-          >
-            {phase.name === "starting" ? <Loader2 className="animate-spin" /> : <TelegramGlyph className="size-5" />}
-            Or confirm in the bot (works on localhost)
+          <Button onClick={() => void begin(true)} size="lg" className="mt-6 h-11 w-full text-base">
+            Try again
           </Button>
-
-          {!showInvite ? (
-            <button
-              type="button"
-              onClick={() => setShowInvite(true)}
-              className="mt-4 inline-flex w-full items-center justify-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground"
-            >
-              <TicketCheck className="size-4" />I have an invite code
-            </button>
-          ) : null}
-
-          <p className="mt-6 flex items-start gap-2 border-t border-white/5 pt-5 text-xs leading-relaxed text-muted-foreground">
-            <Send className="mt-0.5 size-3.5 shrink-0" />
-            We never see your phone number. Telegram only shares your name and username with the bot.
-          </p>
-        </>
+        </div>
+      ) : (
+        <div className="flex flex-col items-center py-8 text-center">
+          <Loader2 className="size-6 animate-spin text-muted-foreground" />
+          <p className="mt-3 text-sm text-muted-foreground">Preparing your login code...</p>
+        </div>
+      )}
+      {mock ? null : (
+        <p className="mt-6 flex items-start gap-2 border-t border-white/5 pt-5 text-xs leading-relaxed text-muted-foreground">
+          <Send className="mt-0.5 size-3.5 shrink-0" />
+          Telegram only shares your name and username. Anyone who taps Start is let in.
+        </p>
       )}
     </div>
   );

@@ -2,7 +2,7 @@ import "./load-env";
 import { Bot, GrammyError, type Context } from "grammy";
 import type { Message } from "grammy/types";
 import { env, isMock } from "@/lib/env";
-import { confirmLogin, createInvite } from "@/lib/access";
+import { confirmLogin } from "@/lib/access";
 import { ensureSchema } from "@/db";
 import {
   catalogStats,
@@ -30,7 +30,6 @@ const HELP_VAULT = [
   "/delete - remove it from the website",
   "",
   "Other commands:",
-  "/invite - create a one-time invite code for a friend",
   "/stats - catalog size",
   "/chatid - show this chat's id",
 ].join("\n");
@@ -78,6 +77,13 @@ const isVault = (ctx: Context) => env.vaultChatId !== null && ctx.chat?.id === e
 
 async function start() {
   const bot = new Bot(env.botToken);
+
+  bot.use(async (ctx, next) => {
+    const text = ctx.msg && "text" in ctx.msg ? ctx.msg.text : undefined;
+    if (text) console.log(`[bot] heard chat ${ctx.chat?.id}: ${text.slice(0, 160)}`);
+    await next();
+  });
+
   const me = await bot.api.getMe();
   if (env.botUsername && env.botUsername.toLowerCase() !== me.username.toLowerCase()) {
     console.warn(`[bot] BOT_USERNAME=${env.botUsername} but the token belongs to @${me.username}`);
@@ -104,10 +110,15 @@ async function start() {
     const payload = ctx.match.trim();
     if (payload.startsWith("login_")) {
       try {
+        await ctx.reply("Signing you in...");
+      } catch (err) {
+        console.error("[bot] login ack failed", err);
+      }
+      try {
         const result = await confirmLogin(payload.slice("login_".length), from);
         if (!result.ok) return ctx.reply(result.message);
         return ctx.reply(
-          `You're logged in, ${result.user.firstName}. Head back to the website - it will continue on its own.\n\n` +
+          `You're in, ${result.user.firstName}. Go back to the website — it will open on its own.\n\n` +
             "Anything you pick there will be sent to this chat.",
         );
       } catch (err) {
@@ -190,19 +201,26 @@ async function start() {
     return quietReply(ctx, "Removed from the website. The message in this chat is untouched.");
   });
 
-  vault.command("invite", async (ctx) => {
-    const code = await createInvite();
-    return ctx.reply(
-      `Invite code: ${code}\n\nShare it with one friend. They enter it on the login page at ${env.siteUrl}/login. It works once.`,
-    );
-  });
-
   vault.command("stats", async (ctx) => {
     const s = await catalogStats();
     return ctx.reply(`${s.movies} movies, ${s.shows} shows, ${s.files} files indexed.`);
   });
 
   vault.command("help", (ctx) => ctx.reply(HELP_VAULT));
+
+  // After the commands, so /start and the vault commands are not swallowed.
+  const handledCommand = /^(?:start|help|chatid|title|movie|tv|delete|stats)$/;
+  bot.on("message:text", async (ctx) => {
+    if (ctx.chat?.type !== "private") return;
+    const command = /^\/([A-Za-z0-9_]+)/.exec(ctx.msg.text)?.[1]?.toLowerCase();
+    if (command && handledCommand.test(command)) return;
+    const name = ctx.from?.first_name ?? "there";
+    await ctx.reply(
+      `Hi ${name}. I'm online.\n\n` +
+        `To sign in, open ${env.siteUrl}/login and scan the code, then tap Start in this chat. That's enough - you're in.\n\n` +
+        `After that, pick something on the site and I'll send it here.`,
+    );
+  });
 
   bot.catch((err) => {
     const e = err.error;

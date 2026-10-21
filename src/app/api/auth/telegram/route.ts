@@ -12,7 +12,6 @@ const schema = z.object({
   photo_url: z.string().optional(),
   auth_date: z.number().int(),
   hash: z.string().min(8),
-  inviteCode: z.string().max(32).optional(),
 });
 
 /** Telegram Login Widget callback. Works on the Vercel domain after /setdomain in BotFather. */
@@ -21,8 +20,7 @@ export async function POST(req: Request) {
   const body = schema.safeParse(await req.json().catch(() => null));
   if (!body.success) return NextResponse.json({ error: "Invalid Telegram login." }, { status: 400 });
 
-  const { inviteCode, ...auth } = body.data;
-  const result = await loginWithTelegram(auth, inviteCode);
+  const result = await loginWithTelegram(body.data);
   if (!result.ok) return NextResponse.json({ error: result.message }, { status: 403 });
   await createSession(result.user.id);
   return NextResponse.json({ status: "ok", name: result.user.firstName });
